@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>LoL Live Champions + Items + Stats</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <h1>LoL Live Champions + Items + Stats</h1>
+
+    <div class="status" id="status">Chargement...</div>
+    <div id="error"></div>
+
+    <div class="gold-summary">
+        <div class="gold-card order">
+            <div class="gold-label">Gold ORDER</div>
+            <div class="gold-value" id="gold-order">0</div>
+        </div>
+
+        <div class="gold-card chaos">
+            <div class="gold-label">Gold CHAOS</div>
+            <div class="gold-value" id="gold-chaos">0</div>
+        </div>
+    </div>
+
+    <div class="gold-note">
+        Clique sur une carte champion pour ouvrir ses stats calculées.
+        Clique sur un item pour afficher ses stats et sa description.
+    </div>
+
+    <div class="teams">
+        <div class="team">
+            <h2>Team ORDER</h2>
+            <div id="team-order"></div>
+        </div>
+
+        <div class="team">
+            <h2>Team CHAOS</h2>
+            <div id="team-chaos"></div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="modal-backdrop">
+        <div class="modal" role="dialog" aria-modal="true">
+            <button class="modal-close" id="modal-close" type="button">×</button>
+            <div id="modal-content"></div>
+        </div>
+    </div>
+
+    <script>
+        let playersCache = [];
+
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+
+        function formatGold(value) {
+            return new Intl.NumberFormat("fr-FR").format(Math.round(value || 0));
+        }
+
+        function renderEffectRows(effects, emptyMessage) {
+            if (!effects || !effects.length) {
+                return `<div class="empty">${escapeHtml(emptyMessage)}</div>`;
+            }
+
+            return `
+                <div class="effects-list">
+                    ${effects.map(effect => `
+                        <div class="effect-row">
+                            <strong>${escapeHtml(effect.label)}</strong>
+                            <span>${escapeHtml(effect.detail)}</span>
+                        </div>
+                    `).join("")}
+                </div>
+            `;
+        }
+
+        function normalizeStatLabel(value) {
+            return String(value ?? "")
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, "");
+        }
+
+        function getLiveStatText(row, liveStats) {
+            const byKey = liveStats?.byKey || {};
+            const liveRows = liveStats?.rows || [];
+            const liveKeys = row.liveKeys || [];
+
+            const valuesFromKeys = liveKeys
+                .map(key => byKey[key])
+                .filter(value => value !== undefined && value !== null && value !== "");
+
+            if (valuesFromKeys.length) {
+                return valuesFromKeys.join(" / ");
+            }
+
+            const normalizedLabel = normalizeStatLabel(row.label);
+            const matchingRow = liveRows.find(liveRow => normalizeStatLabel(liveRow.label) === normalizedLabel);
+
+            return matchingRow?.valueText || "—";
+        }
+
+        function openModal(html) {
+            const backdrop = document.getElementById("modal-backdrop");
+            const content = document.getElementById("modal-content");
+
+            content.innerHTML = html;
+            backdrop.classList.remove("hidden");
+        }
+
+        function closeModal() {
+            document.getElementById("modal-backdrop").classList.add("hidden");
+            document.getElementById("modal-content").innerHTML = "";
+        }
+
+        function handlePlayerKey(event, index) {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                openChampionModal(index);
+            }
+        }
+
+        function renderPlayer(player, index) {
+            const items = player.items || [];
+            const gold = player.gold || {};
+
+            const itemsHtml = items.length
+                ? items.map((item, itemIndex) => `
+                    <button
+                        class="item"
+                        type="button"
+                        title="${escapeHtml(item.name)} - ${formatGold(item.totalPrice)} gold"
+                        onclick="event.stopPropagation(); openItemModal(${index}, ${itemIndex})"
+                    >
+                        ${
+                            item.iconUrl
+                                ? `<img class="item-icon" src="${escapeHtml(item.iconUrl)}" alt="${escapeHtml(item.name)}">`
+                                : `<div class="item-icon item-missing">?</div>`
+                        }
+
+                        ${item.count > 1 ? `<span class="item-count">${escapeHtml(item.count)}</span>` : ""}
+                    </button>
+                `).join("")
+                : `<div class="empty">Aucun item</div>`;
+
+            const goldDetail = gold.isExact
+                ? `
+                    <div class="player-gold-detail">
+                        Items : ${formatGold(gold.itemGold)}
+                        | Non dépensé : ${formatGold(gold.unspentGold)}
+                    </div>
+                `
+                : `
+                    <div class="player-gold-detail">
+                        Estimation items visibles
+                    </div>
+                `;
+
+            return `
+                <div
+                    class="player ${player.isDead ? "dead" : ""}"
+                    onclick="openChampionModal(${index})"
+                    role="button"
+                    tabindex="0"
+                    onkeydown="handlePlayerKey(event, ${index})"
+                >
+                    <div class="player-header">
+                        <div>
+                            <div class="champion-row">
+                                ${
+                                    player.championInfo?.iconUrl
+                                        ? `<img class="champion-icon" src="${escapeHtml(player.championInfo.iconUrl)}" alt="${escapeHtml(player.champion)}">`
+                                        : ""
+                                }
+                                <div>
+                                    <div class="champion">${escapeHtml(player.champion)}</div>
+                                    <div class="riot-id">${escapeHtml(player.riotId)}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="meta">
+                            Lv ${escapeHtml(player.level)}
+                            ${player.position ? " | " + escapeHtml(player.position) : ""}
+                            ${player.isDead ? " | mort" : ""}
+                        </div>
+                    </div>
+
+                    <div class="player-gold">
+                        <span>${formatGold(gold.displayedGold)} gold</span>
+                        ${gold.isExact ? `<small>exact local</small>` : `<small>estimé</small>`}
+                    </div>
+
+                    ${goldDetail}
+
+                    <div class="items">
+                        ${itemsHtml}
+                    </div>
+                </div>
+            `;
+        }
+
+        function openChampionModal(index) {
+            const player = playersCache[index];
+
+            if (!player) {
+                return;
+            }
+
+            const stats = player.championStats || {};
+            const rows = stats.statRows || [];
+            const info = player.championInfo || {};
+            const liveStats = player.liveStats || {};
+            const runes = player.runes || {};
+            const objectives = player.teamObjectives || {};
+            const passive = player.passive || {};
+
+            const statRowsHtml = rows.length
+                ? rows.map(row => {
+                    const liveText = getLiveStatText(row, liveStats);
+                    const liveClass = liveText === "—" ? "stat-live-empty" : "stat-live-cell";
+
+                    return `
+                        <tr>
+                            <td>${escapeHtml(row.label)}</td>
+                            <td>${escapeHtml(row.baseText)}</td>
+                            <td>${escapeHtml(row.bonusText)}</td>
+                            <td><strong>${escapeHtml(row.totalText)}</strong></td>
+                            <td class="${liveClass}">${escapeHtml(liveText)}</td>
+                        </tr>
+                    `;
+                }).join("")
+                : `
+                    <tr>
+                        <td colspan="5">Stats indisponibles pour ce champion.</td>
+                    </tr>
+                `;
+
+            const runeTrees = [
+                runes.primaryTree?.name ? `Principal : ${runes.primaryTree.name}` : "",
+                runes.secondaryTree?.name ? `Secondaire : ${runes.secondaryTree.name}` : "",
+                runes.keystone?.name ? `Fondamentale : ${runes.keystone.name}` : "",
+            ].filter(Boolean).join(" | ");
+
+            const runesHtml = runes.available && runes.runes?.length
+                ? `
+                    ${runeTrees ? `<div class="rune-trees">${escapeHtml(runeTrees)}</div>` : ""}
+                    <div class="effects-list">
+                        ${runes.runes.map(rune => `
+                            <div class="rune-row">
+                                ${
+                                    rune.iconUrl
+                                        ? `<img class="rune-icon" src="${escapeHtml(rune.iconUrl)}" alt="${escapeHtml(rune.name)}">`
+                                        : `<div class="rune-icon item-missing">?</div>`
+                                }
+                                <div>
+                                    <div class="rune-name">
+                                        ${escapeHtml(rune.name)}
+                                        ${rune.isKeystone ? `<span>Fondamentale</span>` : ""}
+                                    </div>
+                                    <div class="rune-desc">
+                                        ${escapeHtml(rune.longDesc || rune.shortDesc || "Description indisponible.")}
+                                    </div>
+                                </div>
+                            </div>
+                        `).join("")}
+                    </div>
+                `
+                : `<div class="empty">${escapeHtml(runes.message || "Runes indisponibles via l'API locale.")}</div>`;
+
+            const passiveHtml = passive.available
+                ? `
+                    <div class="passive-row">
+                        ${
+                            passive.iconUrl
+                                ? `<img class="passive-icon" src="${escapeHtml(passive.iconUrl)}" alt="${escapeHtml(passive.name)}">`
+                                : `<div class="passive-icon item-missing">?</div>`
+                        }
+                        <div>
+                            <div class="passive-name">${escapeHtml(passive.name)}</div>
+                            <div class="passive-desc">${escapeHtml(passive.description || "Description indisponible.")}</div>
+                        </div>
+                    </div>
+                `
+                : `<div class="empty">${escapeHtml(passive.message || "Passif du champion indisponible.")}</div>`;
+
+            const itemSummaryHtml = (player.items || []).length
+                ? player.items.map((item, itemIndex) => `
+                    <button
+                        class="modal-item-mini"
+                        type="button"
+                        title="${escapeHtml(item.name)}"
+                        onclick="openItemModal(${index}, ${itemIndex})"
+                    >
+                        ${
+                            item.iconUrl
+                                ? `<img src="${escapeHtml(item.iconUrl)}" alt="${escapeHtml(item.name)}">`
+                                : "?"
+                        }
+                    </button>
+                `).join("")
+                : `<span class="empty">Aucun item</span>`;
+
+            openModal(`
+                <div class="modal-header">
+                    ${
+                        info.iconUrl
+                            ? `<img class="modal-champion-icon" src="${escapeHtml(info.iconUrl)}" alt="${escapeHtml(player.champion)}">`
+                            : ""
+                    }
+
+                    <div>
+                        <h2>${escapeHtml(player.champion)}</h2>
+                        <div class="modal-subtitle">
+                            ${escapeHtml(info.title || "")}
+                            ${info.title ? " · " : ""}
+                            ${escapeHtml(player.riotId)}
+                            · Niveau ${escapeHtml(player.level)}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <h3>Stats calculées : niveau + items</h3>
+
+                    <table class="stats-table">
+                        <thead>
+                            <tr>
+                                <th>Stat</th>
+                                <th>Champion lvl ${escapeHtml(player.level)}</th>
+                                <th>Items</th>
+                                <th>Total calculé</th>
+                                <th>Stat live</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${statRowsHtml}
+                        </tbody>
+                    </table>
+
+                    <div class="modal-note">
+                        ${escapeHtml(stats.note || "")}
+                        ${liveStats.message ? `<br>Stat live : ${escapeHtml(liveStats.message)}` : ""}
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <h3>Runes</h3>
+                    ${runesHtml}
+                </div>
+
+                <div class="modal-section">
+                    <h3>Buffs temporaires / objectifs d'équipe</h3>
+                    ${renderEffectRows(objectives.effects, objectives.message || "Aucun objectif ou buff d'équipe détecté.")}
+                </div>
+
+                <div class="modal-section">
+                    <h3>Passif du champion</h3>
+                    ${passiveHtml}
+                </div>
+
+                <div class="modal-section">
+                    <h3>Items équipés</h3>
+                    <div class="modal-items-row">
+                        ${itemSummaryHtml}
+                    </div>
+                </div>
+
+                <div class="modal-note">
+                    ${escapeHtml(player.effectsNote || "")}
+                </div>
+            `);
+        }
+
+        function openItemModal(playerIndex, itemIndex) {
+            const player = playersCache[playerIndex];
+
+            if (!player || !player.items || !player.items[itemIndex]) {
+                return;
+            }
+
+            const item = player.items[itemIndex];
+
+            const statLinesHtml = item.statLines && item.statLines.length
+                ? item.statLines.map(line => `<li>${escapeHtml(line)}</li>`).join("")
+                : `<li>Aucune stat structurée dans Data Dragon. Voir la description.</li>`;
+
+            openModal(`
+                <div class="modal-header">
+                    ${
+                        item.iconUrl
+                            ? `<img class="modal-item-icon" src="${escapeHtml(item.iconUrl)}" alt="${escapeHtml(item.name)}">`
+                            : ""
+                    }
+
+                    <div>
+                        <h2>${escapeHtml(item.name)}</h2>
+                        <div class="modal-subtitle">
+                            ${formatGold(item.price)} gold
+                            ${item.count > 1 ? ` · x${escapeHtml(item.count)}` : ""}
+                        </div>
+                    </div>
+                </div>
+
+                ${
+                    item.plaintext
+                        ? `<div class="modal-plaintext">${escapeHtml(item.plaintext)}</div>`
+                        : ""
+                }
+
+                <div class="modal-section">
+                    <h3>Stats de l'item</h3>
+                    <ul class="item-stat-list">
+                        ${statLinesHtml}
+                    </ul>
+                </div>
+
+                <div class="modal-section">
+                    <h3>Description / effets</h3>
+                    <div class="item-description">
+                        ${escapeHtml(item.description || "Pas de description disponible.")}
+                    </div>
+                </div>
+            `);
+        }
+
+        async function refreshData() {
+            const status = document.getElementById("status");
+            const error = document.getElementById("error");
+            const orderDiv = document.getElementById("team-order");
+            const chaosDiv = document.getElementById("team-chaos");
+            const goldOrder = document.getElementById("gold-order");
+            const goldChaos = document.getElementById("gold-chaos");
+
+            try {
+                const response = await fetch("/api/players");
+                const data = await response.json();
+
+                if (!data.ok) {
+                    playersCache = [];
+                    error.innerHTML = `<div class="error">${escapeHtml(data.error)}</div>`;
+                    orderDiv.innerHTML = "";
+                    chaosDiv.innerHTML = "";
+                    goldOrder.textContent = "0";
+                    goldChaos.textContent = "0";
+                    status.textContent = "En attente d'une partie active...";
+                    return;
+                }
+
+                error.innerHTML = "";
+
+                playersCache = data.players || [];
+
+                orderDiv.innerHTML = playersCache
+                    .map((player, index) => player.team === "ORDER" ? renderPlayer(player, index) : "")
+                    .join("");
+
+                chaosDiv.innerHTML = playersCache
+                    .map((player, index) => player.team === "CHAOS" ? renderPlayer(player, index) : "")
+                    .join("");
+
+                goldOrder.textContent = formatGold(data.teams?.ORDER?.gold || 0);
+                goldChaos.textContent = formatGold(data.teams?.CHAOS?.gold || 0);
+
+                status.textContent = `Dernière mise à jour : ${new Date().toLocaleTimeString()}`;
+
+            } catch (e) {
+                error.innerHTML = `<div class="error">Erreur côté page web : ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        document.getElementById("modal-close").addEventListener("click", closeModal);
+
+        document.getElementById("modal-backdrop").addEventListener("click", function (event) {
+            if (event.target.id === "modal-backdrop") {
+                closeModal();
+            }
+        });
+
+        document.addEventListener("keydown", function (event) {
+            if (event.key === "Escape") {
+                closeModal();
+            }
+        });
+
+        refreshData();
+        setInterval(refreshData, 2000);
+    </script>
+</body>
+</html>
